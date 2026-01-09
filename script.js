@@ -1,6 +1,4 @@
-import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
-import { getDatabase, ref, set, onValue, update, get } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-database.js";
-
+// Firebase Configuration
 const firebaseConfig = {
     apiKey: "AIzaSyBkP0svfYAZaubdCP3OC8ZBS6ioUPzD-cI",
     authDomain: "party-tracker-dc912.firebaseapp.com",
@@ -8,16 +6,18 @@ const firebaseConfig = {
     storageBucket: "party-tracker-dc912.firebasestorage.app",
     messagingSenderId: "1061606049560",
     appId: "1:1061606049560:web:d0b3db58c285de2b3b006d",
-    measurementId: "G-0DPVKJD1F5"
+    measurementId: "G-0DPVKJD1F5",
+    databaseURL: "https://party-tracker-dc912-default-rtdb.firebaseio.com"
 };
 
-// Initialize Firebase
+// Initialize Firebase (Compat)
 let db;
 try {
-    const app = initializeApp(firebaseConfig);
-    db = getDatabase(app);
+    firebase.initializeApp(firebaseConfig);
+    db = firebase.database();
 } catch (e) {
     console.error("Error inicializando Firebase. Revisa tu configuración.", e);
+    alert("Error conectando con la base de datos: " + e.message);
 }
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -58,8 +58,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // Setup Realtime Listener
         if (db) {
-            const dbRef = ref(db, 'party-tracker');
-            onValue(dbRef, (snapshot) => {
+            const dbRef = db.ref('party-tracker');
+            dbRef.on('value', (snapshot) => {
                 const data = snapshot.val();
                 if (data) {
                     globalData = data;
@@ -72,8 +72,6 @@ document.addEventListener('DOMContentLoaded', () => {
                     }
                 }
             });
-        } else {
-            alert("Falta configurar Firebase en script.js");
         }
     }
 
@@ -84,11 +82,14 @@ document.addEventListener('DOMContentLoaded', () => {
         // Check if user exists in globalData (which comes from DB)
         // If not, we initialize them in the DB
         if (db) {
-            const userRef = ref(db, `party-tracker/users/${name}`);
-            get(userRef).then((snapshot) => {
+            const userRef = db.ref(`party-tracker/users/${name}`);
+            userRef.get().then((snapshot) => {
                 if (!snapshot.exists()) {
-                    set(userRef, initializeUserStats());
+                    userRef.set(initializeUserStats());
                 }
+            }).catch((error) => {
+                console.error("Error checking user:", error);
+                // Fallback if get fails (e.g. permission denied), try setting anyway if we are confident
             });
         }
 
@@ -127,37 +128,39 @@ document.addEventListener('DOMContentLoaded', () => {
                 <div class="counter-title">${type.label}</div>
                 <div class="counter-value" id="val-${type.id}">${count}</div>
                 <div class="counter-controls">
-                    <button class="control-btn btn-minus" data-id="${type.id}" data-action="-1">-</button>
-                    <button class="control-btn btn-plus" data-id="${type.id}" data-action="1">+</button>
+                    <button class="control-btn btn-minus" onclick="updateCounter('${type.id}', -1)">-</button>
+                    <button class="control-btn btn-plus" onclick="updateCounter('${type.id}', 1)">+</button>
                 </div>
             `;
             countersContainer.appendChild(card);
         });
-
-        // Re-attach listeners because we are using module and inline onclick won't work easily
-        document.querySelectorAll('.control-btn').forEach(btn => {
-            btn.addEventListener('click', (e) => {
-                const id = e.target.dataset.id;
-                const change = parseInt(e.target.dataset.action);
-                updateCounter(id, change);
-            });
-        });
     }
 
-    function updateCounter(id, change) {
-        if (!db) return;
+    // Expose to global scope for inline onclick
+    // Expose to global scope for inline onclick
+    window.updateCounter = function (id, change) {
+        // Ensure userStats structure exists locally
+        if (!globalData.users) globalData.users = {};
+        if (!globalData.users[currentUser]) globalData.users[currentUser] = initializeUserStats();
 
-        const userStats = (globalData.users && globalData.users[currentUser]) || initializeUserStats();
+        const userStats = globalData.users[currentUser];
         const newValue = (userStats[id] || 0) + change;
 
         if (newValue >= 0) {
-            // Optimistic update (optional, but DB is fast enough usually)
-            const updates = {};
-            updates[`party-tracker/users/${currentUser}/${id}`] = newValue;
-            update(ref(db), updates);
+            // 1. Optimistic Update (Local)
+            userStats[id] = newValue;
 
-            // Animation is handled by re-render or we can add it here if we want instant feedback
-            // For now, let's rely on the DB listener to update the UI to ensure sync
+            // 2. Render Immediately
+            renderCounters();
+
+            // 3. Sync to DB (if available)
+            if (db) {
+                const updates = {};
+                updates[`party-tracker/users/${currentUser}/${id}`] = newValue;
+                db.ref().update(updates).catch(err => {
+                    console.warn("Could not sync to DB (offline mode?):", err);
+                });
+            }
         }
     };
 
@@ -237,7 +240,7 @@ document.addEventListener('DOMContentLoaded', () => {
     resetAllBtn.addEventListener('click', () => {
         if (confirm('¿Seguro que quieres reiniciar TUS contadores a 0?')) {
             if (db) {
-                set(ref(db, `party-tracker/users/${currentUser}`), initializeUserStats());
+                db.ref(`party-tracker/users/${currentUser}`).set(initializeUserStats());
             }
         }
     });
