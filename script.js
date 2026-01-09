@@ -50,20 +50,37 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Functions
     function init() {
+        // 1. Load from LocalStorage first (Instant availability)
+        const localData = localStorage.getItem('party-tracker-data');
+        if (localData) {
+            try {
+                globalData = JSON.parse(localData);
+                if (!globalData.users) globalData.users = {};
+            } catch (e) {
+                console.error("Error parsing local data", e);
+            }
+        }
+
         // Check if name exists in session storage
         const savedName = sessionStorage.getItem('partyTrackerName');
         if (savedName) {
             login(savedName);
         }
 
-        // Setup Realtime Listener
+        // 2. Setup Realtime Listener (Best effort sync)
         if (db) {
             const dbRef = db.ref('party-tracker');
             dbRef.on('value', (snapshot) => {
                 const data = snapshot.val();
                 if (data) {
+                    // Merge or overwrite? For now, we trust server more if it exists
+                    // But if server is empty and we have local data, we keeps ours?
+                    // Simple approach: Server authority if connected.
                     globalData = data;
                     if (!globalData.users) globalData.users = {};
+
+                    // Update LocalStorage to match Server
+                    localStorage.setItem('party-tracker-data', JSON.stringify(globalData));
 
                     // Update UI if logged in
                     if (currentUser) {
@@ -149,6 +166,9 @@ document.addEventListener('DOMContentLoaded', () => {
         if (newValue >= 0) {
             // 1. Optimistic Update (Local)
             userStats[id] = newValue;
+
+            // 1b. Persist to LocalStorage
+            localStorage.setItem('party-tracker-data', JSON.stringify(globalData));
 
             // 2. Render Immediately
             renderCounters();
