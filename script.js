@@ -1,3 +1,25 @@
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
+import { getDatabase, ref, set, onValue, update, get } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-database.js";
+
+const firebaseConfig = {
+    apiKey: "AIzaSyBkP0svfYAZaubdCP3OC8ZBS6ioUPzD-cI",
+    authDomain: "party-tracker-dc912.firebaseapp.com",
+    projectId: "party-tracker-dc912",
+    storageBucket: "party-tracker-dc912.firebasestorage.app",
+    messagingSenderId: "1061606049560",
+    appId: "1:1061606049560:web:d0b3db58c285de2b3b006d",
+    measurementId: "G-0DPVKJD1F5"
+};
+
+// Initialize Firebase
+let db;
+try {
+    const app = initializeApp(firebaseConfig);
+    db = getDatabase(app);
+} catch (e) {
+    console.error("Error inicializando Firebase. Revisa tu configuración.", e);
+}
+
 document.addEventListener('DOMContentLoaded', () => {
     // DOM Elements
     const welcomeScreen = document.getElementById('welcome-screen');
@@ -16,6 +38,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // State
     let currentUser = '';
+    let globalData = { users: {} }; // Local cache of DB data
+
     const counterTypes = [
         { id: 'beers', label: 'Cervezas', icon: '🍺' },
         { id: 'drinks', label: 'Copas', icon: '🍹' },
@@ -26,33 +50,51 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Functions
     function init() {
-        // Check if name exists in session storage (for page reload convenience)
+        // Check if name exists in session storage
         const savedName = sessionStorage.getItem('partyTrackerName');
         if (savedName) {
             login(savedName);
         }
+
+        // Setup Realtime Listener
+        if (db) {
+            const dbRef = ref(db, 'party-tracker');
+            onValue(dbRef, (snapshot) => {
+                const data = snapshot.val();
+                if (data) {
+                    globalData = data;
+                    if (!globalData.users) globalData.users = {};
+
+                    // Update UI if logged in
+                    if (currentUser) {
+                        renderCounters();
+                        renderRankings();
+                    }
+                }
+            });
+        } else {
+            alert("Falta configurar Firebase en script.js");
+        }
     }
 
     function login(name) {
-        try {
-            currentUser = name;
-            sessionStorage.setItem('partyTrackerName', name);
+        currentUser = name;
+        sessionStorage.setItem('partyTrackerName', name);
 
-            // Ensure user exists in localStorage
-            const data = getStoredData();
-            if (!data.users[name]) {
-                data.users[name] = initializeUserStats();
-                saveData(data);
-            }
-
-            showDashboard();
-            renderCounters();
-        } catch (error) {
-            console.error("Login error:", error);
-            alert("Hubo un error al iniciar sesión. Intentando reiniciar datos...");
-            localStorage.removeItem('partyTrackerData');
-            location.reload();
+        // Check if user exists in globalData (which comes from DB)
+        // If not, we initialize them in the DB
+        if (db) {
+            const userRef = ref(db, `party-tracker/users/${name}`);
+            get(userRef).then((snapshot) => {
+                if (!snapshot.exists()) {
+                    set(userRef, initializeUserStats());
+                }
+            });
         }
+
+        showDashboard();
+        // Initial render (might be empty until DB syncs)
+        renderCounters();
     }
 
     function initializeUserStats() {
@@ -61,25 +103,6 @@ document.addEventListener('DOMContentLoaded', () => {
         return stats;
     }
 
-    function getStoredData() {
-        try {
-            const raw = localStorage.getItem('partyTrackerData');
-            const data = raw ? JSON.parse(raw) : { users: {} };
-
-            // Validate structure
-            if (!data.users) {
-                data.users = {};
-            }
-            return data;
-        } catch (e) {
-            console.error("Data corruption detected", e);
-            return { users: {} };
-        }
-    }
-
-    function saveData(data) {
-        localStorage.setItem('partyTrackerData', JSON.stringify(data));
-    }
     function showDashboard() {
         displayName.textContent = currentUser;
         welcomeScreen.classList.remove('active');
@@ -92,8 +115,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function renderCounters() {
-        const data = getStoredData();
-        const userStats = data.users[currentUser];
+        const userStats = (globalData.users && globalData.users[currentUser]) || initializeUserStats();
 
         countersContainer.innerHTML = '';
         counterTypes.forEach(type => {
@@ -105,41 +127,42 @@ document.addEventListener('DOMContentLoaded', () => {
                 <div class="counter-title">${type.label}</div>
                 <div class="counter-value" id="val-${type.id}">${count}</div>
                 <div class="counter-controls">
-                    <button class="control-btn btn-minus" onclick="updateCounter('${type.id}', -1)">-</button>
-                    <button class="control-btn btn-plus" onclick="updateCounter('${type.id}', 1)">+</button>
+                    <button class="control-btn btn-minus" data-id="${type.id}" data-action="-1">-</button>
+                    <button class="control-btn btn-plus" data-id="${type.id}" data-action="1">+</button>
                 </div>
             `;
             countersContainer.appendChild(card);
         });
+
+        // Re-attach listeners because we are using module and inline onclick won't work easily
+        document.querySelectorAll('.control-btn').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                const id = e.target.dataset.id;
+                const change = parseInt(e.target.dataset.action);
+                updateCounter(id, change);
+            });
+        });
     }
 
-    // Expose updateCounter to global scope
-    window.updateCounter = function (id, change) {
-        const data = getStoredData();
-        const userStats = data.users[currentUser];
+    function updateCounter(id, change) {
+        if (!db) return;
 
+        const userStats = (globalData.users && globalData.users[currentUser]) || initializeUserStats();
         const newValue = (userStats[id] || 0) + change;
 
         if (newValue >= 0) {
-            userStats[id] = newValue;
-            saveData(data);
+            // Optimistic update (optional, but DB is fast enough usually)
+            const updates = {};
+            updates[`party-tracker/users/${currentUser}/${id}`] = newValue;
+            update(ref(db), updates);
 
-            // Animate update
-            const valueEl = document.getElementById(`val-${id}`);
-            valueEl.style.transform = 'scale(1.2)';
-            valueEl.style.color = change > 0 ? 'var(--success-color)' : 'var(--danger-color)';
-
-            setTimeout(() => {
-                valueEl.textContent = newValue;
-                valueEl.style.transform = 'scale(1)';
-                valueEl.style.color = 'var(--text-primary)';
-            }, 100);
+            // Animation is handled by re-render or we can add it here if we want instant feedback
+            // For now, let's rely on the DB listener to update the UI to ensure sync
         }
     };
 
     function renderRankings() {
-        const data = getStoredData();
-        const users = data.users;
+        const users = globalData.users || {};
         const userNames = Object.keys(users);
 
         rankingsContainer.innerHTML = '';
@@ -213,10 +236,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
     resetAllBtn.addEventListener('click', () => {
         if (confirm('¿Seguro que quieres reiniciar TUS contadores a 0?')) {
-            const data = getStoredData();
-            data.users[currentUser] = initializeUserStats();
-            saveData(data);
-            renderCounters();
+            if (db) {
+                set(ref(db, `party-tracker/users/${currentUser}`), initializeUserStats());
+            }
         }
     });
 
